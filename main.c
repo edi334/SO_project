@@ -1,5 +1,4 @@
 #include <stdio.h>
-#include <stdio.h>
 #include <sys/types.h>
 #include <string.h>
 #include <stdlib.h>
@@ -7,15 +6,18 @@
 #include <errno.h> // Declaration of global variable errno
 #include <fcntl.h> // File descriptor
 #include <unistd.h> // Miscellanous functions
-#include <stdio.h>
 #include <sys/stat.h>
 #include <dirent.h>
+#include <sys/wait.h>
+
+#define PROCESS_NUMBER 3
 
 char name[100], option[10];
 DIR *dir;
-char path[100];
+char path[100], compiled_path[100];
 struct stat fis_stat;
 struct dirent *in;
+int pid, status;
 
 char *get_extension (char *filename) {
     char *dot = strchr(filename, '.');
@@ -48,7 +50,7 @@ void file_info() {
     }
 
     if (has_option('u')) {
-        printf("ID-ul utilizatorului este: %c\n", fis_stat.st_uid);
+        printf("ID-ul utilizatorului este: %d\n", fis_stat.st_uid);
     }
 
     if (has_option('a')) {
@@ -73,6 +75,8 @@ void file_info() {
     if (has_option('c')) {
         printf("Numarul de legaturi al fisierului: %d\n", fis_stat.st_nlink);
     }
+
+    printf("\n");
 }
 
 void make_symlink(char *filepath) {
@@ -95,11 +99,61 @@ void citire() {
             exit(1);
         }
 
-        if (S_ISREG(fis_stat.st_mode) && is_c_file(path)) {
-            file_info();
+        if (has_option('g')) {
+            if (S_ISREG(fis_stat.st_mode) && is_c_file(in->d_name)) {
+                strcpy(compiled_path, remove_extension(path));
+                strcat(compiled_path, "_compiled");
+                char **exec_args = malloc(4 * sizeof(char *));
+                exec_args[0] = "gcc";
+                exec_args[1] = "-o";
+                exec_args[2] = compiled_path;
+                exec_args[3] = path;
+                exec_args[4] = NULL;
+                if ((pid = fork()) < 0) {
+                    perror("EROARE LA DESCHIDEREA PROCESULUI!");
+                    exit(1);
+                }
+                if (pid == 0) {
+                    if (execvp(exec_args[0], exec_args) == -1) {
+                        perror("execvp() FAILED!");
+                        exit(1);
+                    }
+                    exit(2);
+                }
 
-            if (fis_stat.st_size < 100000) {
-                make_symlink(path);
+                if ((pid = fork()) < 0) {
+                    perror("EROARE LA DESCHIDEREA PROCESULUI!");
+                    exit(1);
+                }
+                if (pid == 0) {
+                    file_info();
+                    exit(2);
+                }
+
+                if (fis_stat.st_size < 100000) {
+                    if ((pid = fork()) < 0) {
+                        perror("EROARE LA DESCHIDEREA PROCESULUI!");
+                        exit(1);
+                    }
+                    if (pid == 0) {
+                        make_symlink(path);
+                        exit(2);
+                    }
+                }
+
+                for (int i = 0; i < PROCESS_NUMBER; ++i) {
+                    pid = wait(&status);
+                    printf("Procesul fiu cu PID %d s-a terminat cu codul %d\n", pid, WEXITSTATUS(status));
+                }
+                printf("\n");
+            }
+        } else {
+            if (S_ISREG(fis_stat.st_mode) && is_c_file(in->d_name)) {
+                file_info();
+
+                if (fis_stat.st_size < 100000) {
+                    make_symlink(path);
+                }
             }
         }
     }
