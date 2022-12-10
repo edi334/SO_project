@@ -10,14 +10,12 @@
 #include <dirent.h>
 #include <sys/wait.h>
 
-
 char name[100], option[10];
 DIR *dir;
 char path[100], compiled_path[100], read_result[256];
 struct stat fis_stat;
 struct dirent *in;
 int pid, status, comp_inter[2], inter_parinte[2];
-int PROCESS_COUNT = 0;
 
 char *get_extension (char *filename) {
     char *dot = strchr(filename, '.');
@@ -75,8 +73,6 @@ void file_info() {
     if (has_option('c')) {
         printf("Numarul de legaturi al fisierului: %d\n", fis_stat.st_nlink);
     }
-
-    printf("\n");
 }
 
 void make_symlink() {
@@ -86,6 +82,17 @@ void make_symlink() {
     if (symlink(path, linkpath) != 0) {
         printf("EROARE LA CREAREA LEGATURII SIMBOLICE!");
         unlink(path);
+        exit(1);
+    }
+}
+
+void open_pipes() {
+    if (pipe(comp_inter) < 0) {
+        perror("EROARE LA CREAREA PIPE-ULUI!");
+        exit(1);
+    }
+    if (pipe(inter_parinte) < 0) {
+        perror("EROARE LA CREAREA PIPE-ULUI!");
         exit(1);
     }
 }
@@ -101,54 +108,85 @@ void compile() {
     exec_args[4] = NULL;
 
     if (has_option('p')) {
-        if (pipe(comp_inter) < 0) {
-            perror("EROARE LA CREAREA PIPE-ULUI!");
+        if (close(comp_inter[0]) == -1) {
+            perror("EROARE LA INCHIDEREA DESCRIPTORULUI!");
             exit(1);
         }
-
-        close(comp_inter[0]);
         dup2(comp_inter[1], 1);
+        if (close(comp_inter[1]) == -1) {
+            perror("EROARE LA INCHIDEREA DESCRIPTORULUI!");
+            exit(1);
+        }
     }
 
-    if (execvp(exec_args[0], exec_args) == -1) {
-        perror("execvp() FAILED!");
-        exit(1);
-    }
+    execvp(exec_args[0], exec_args);
+    perror("execvp() FAILED!");
+    exit(1);
 }
 
 void filter() {
-    if (pipe(inter_parinte) < 0) {
-        perror("EROARE LA CREAREA PIPE-ULUI!");
+    if (close(comp_inter[1]) == -1) {
+        perror("EROARE LA INCHIDEREA DESCRIPTORULUI!");
         exit(1);
     }
-
-    close(comp_inter[1]);
-    close(inter_parinte[0]);
+    if (close(inter_parinte[0]) == -1) {
+        perror("EROARE LA INCHIDEREA DESCRIPTORULUI!");
+        exit(1);
+    }
 
     dup2(comp_inter[0], 0);
     dup2(inter_parinte[1], 1);
 
-    close(comp_inter[0]);
-    close(inter_parinte[1]);
-
-    if (execlp("egrep", "egrep", "-w", "error|warning", NULL) == -1) {
-        perror("execlp() FAILED!");
+    if (close(comp_inter[0]) == -1) {
+        perror("EROARE LA INCHIDEREA DESCRIPTORULUI!");
         exit(1);
     }
+    if (close(inter_parinte[1]) == -1) {
+        perror("EROARE LA INCHIDEREA DESCRIPTORULUI!");
+        exit(1);
+    }
+
+    execlp("egrep", "egrep", "-w", "error|warning", NULL);
+    perror("execlp() FAILED!");
+    exit(1);
 }
 
-void get_score() {
-    close(inter_parinte[1]);
+int get_score() {
+    if (close(inter_parinte[1]) == -1) {
+        perror("EROARE LA INCHIDEREA DESCRIPTORULUI!");
+        exit(1);
+    }
 
     if (read(inter_parinte[0], read_result, sizeof(read_result)) < 0) {
         perror("EROARE LA CITIRE");
         exit(1);
     }
 
-    printf("%s", read_result);
+    if (close(inter_parinte[1]) == -1) {
+        perror("EROARE LA INCHIDEREA DESCRIPTORULUI!");
+        exit(1);
+    }
+
+    if (strstr(read_result, "error") != NULL) {
+        return 0;
+    }
+
+    char *ptr1 = strstr(read_result, "warning");
+    int count = 0;
+    while (ptr1 != NULL) {
+        ++count;
+        ptr1 = strstr(read_result, "warning");
+    }
+
+    if (count > 10) return 2;
+
+    return 2 + 8 * (10 - count) / 2;
 }
 
 void citire() {
+    if (has_option('p')) {
+        open_pipes();
+    }
     while ((in = readdir(dir)) != NULL) {
         sprintf(path, "%s/%s", name, in->d_name);
 
@@ -165,9 +203,10 @@ void citire() {
                 }
                 if (pid == 0) {
                     compile();
-                    PROCESS_COUNT++;
-                    exit(2);
                 }
+
+                waitpid(pid, &status, 0);
+                printf("Procesul fiu cu PID %d s-a terminat cu codul %d\n", pid, WEXITSTATUS(status));
 
                 if (has_option('p')) {
                     if ((pid = fork()) < 0) {
@@ -176,11 +215,13 @@ void citire() {
                     }
                     if (pid == 0) {
                         filter();
-                        PROCESS_COUNT++;
                         exit(2);
                     }
 
-                    get_score();
+                    waitpid(pid, &status, 0);
+                    printf("Procesul fiu cu PID %d s-a terminat cu codul %d\n", pid, WEXITSTATUS(status));
+
+                    printf("Rezultatul este %d", get_score());
                 }
 
                 if ((pid = fork()) < 0) {
@@ -189,9 +230,11 @@ void citire() {
                 }
                 if (pid == 0) {
                     file_info();
-                    PROCESS_COUNT++;
                     exit(2);
                 }
+
+                waitpid(pid, &status, 0);
+                printf("Procesul fiu cu PID %d s-a terminat cu codul %d\n", pid, WEXITSTATUS(status));
 
                 if (fis_stat.st_size < 100000) {
                     if ((pid = fork()) < 0) {
@@ -200,15 +243,13 @@ void citire() {
                     }
                     if (pid == 0) {
                         make_symlink();
-                        PROCESS_COUNT++;
                         exit(2);
                     }
-                }
 
-                for (int i = 0; i < PROCESS_COUNT; ++i) {
-                    pid = wait(&status);
+                    waitpid(pid, &status, 0);
                     printf("Procesul fiu cu PID %d s-a terminat cu codul %d\n", pid, WEXITSTATUS(status));
                 }
+
                 printf("\n");
             }
         } else {
